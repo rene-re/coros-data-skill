@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import hashlib
+import json
+import os
+import random
+import sys
+import time
+from datetime import datetime
+
+import requests
+from Cryptodome.Cipher import AES
+
+WEB_BASE = os.environ.get("COROS_WEB_BASE", "https://teamcnapi.coros.com")
+MOBILE_BASE = os.environ.get("COROS_MOBILE_BASE", "https://apicn.coros.com")
+WEB_TOKEN = os.environ.get("COROS_WEB_TOKEN") or os.environ.get("COROS_ACCESS_TOKEN")
+MOBILE_TOKEN = os.environ.get("COROS_MOBILE_TOKEN")
+MOBILE_EMAIL = os.environ.get("COROS_MOBILE_EMAIL")
+MOBILE_PASSWORD = os.environ.get("COROS_MOBILE_PASSWORD")
+MOBILE_LOGIN_IV = b"weloop3_2015_03#"
+
+WEB_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Origin": "https://trainingcn.coros.com",
+    "Referer": "https://trainingcn.coros.com/",
+}
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def require_web_token():
+    if not WEB_TOKEN:
+        fail("Missing COROS_WEB_TOKEN (or COROS_ACCESS_TOKEN) for web API")
+
+
+def require_mobile_token():
+    if not MOBILE_TOKEN:
+        fail("Missing COROS_MOBILE_TOKEN for mobile API")
+
+
+def resolve_mobile_token():
+    if MOBILE_TOKEN:
+        return MOBILE_TOKEN
+    if MOBILE_EMAIL and MOBILE_PASSWORD:
+        return mobile_login(MOBILE_EMAIL, MOBILE_PASSWORD)
+    fail("Missing COROS_MOBILE_TOKEN or COROS_MOBILE_EMAIL/COROS_MOBILE_PASSWORD for mobile API")
+
+
+def web_get(path, params=None):
+    require_web_token()
+    headers = {**WEB_HEADERS, "accesstoken": WEB_TOKEN}
+    response = requests.get(f"{WEB_BASE}{path}", params=params, headers=headers, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("result") not in (None, "0000") and data.get("apiCode") is None:
+        fail(f"Web API error: {data.get('message', data)}")
+    return data
+
+
+def web_post(path, payload=None, params=None):
+    require_web_token()
+    headers = {**WEB_HEADERS, "accesstoken": WEB_TOKEN, "Content-Type": "application/json"}
+    response = requests.post(f"{WEB_BASE}{path}", params=params, json=payload or {}, headers=headers, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("result") not in (None, "0000") and data.get("apiCode") is None:
+        fail(f"Web API error: {data.get('message', data)}")
+    return data
+
+
+def mobile_post(path, payload=None, params=None):
+    token = resolve_mobile_token()
+    headers = {"Content-Type": "application/json", "accesstoken": token, "User-Agent": "okhttp/4.9.0"}
+    query = dict(params or {})
+    query.setdefault("accessToken", token)
+    response = requests.post(f"{MOBILE_BASE}{path}", params=query, json=payload or {}, headers=headers, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("result") != "0000":
+        fail(f"Mobile API error: {data.get('message', data)}")
+    return data
+
+
+def md5_hex(value):
+    return hashlib.md5(value.encode()).hexdigest()
+
+
+def mobile_encrypt(plaintext, app_key):
+    key = app_key.encode("ascii")
+    data = plaintext.encode("utf-8")
+    xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
+    pad_len = 16 - (len(xored) % 16)
+    padded = xored + bytes([pad_len] * pad_len)
+    cipher = AES.new(key, AES.MODE_CBC, MOBILE_LOGIN_IV)
+    return base64.b64encode(cipher.encrypt(padded)).decode("ascii")
+
+
+def mobile_login(email, password):
+    app_key = str(random.randint(1_000_000_000_000_000, 9_999_999_999_999_999))
+    payload = {
+        "account": mobile_encrypt(email, app_key) + "\n",
+        "accountType": 2,
+        "appKey": app_key,
+        "clientType": 1,
+        "hasHrCalibrated": 0,
+        "kbValidity": 0,
+        "pwd": mobile_encrypt(md5_hex(password), app_key) + "\n",
+        "region": "310|Asia/Shanghai|CN",
+        "skipValidation": False,
+    }
+    yfheader = json.dumps(
+        {
+            "appVersion": 1125917087236096,
+            "clientType": 1,
+            "language": "zh-CN",
+            "mobileName": "sdk_gphone64_arm64,google,Google",
+            "releaseType": 1,
+            "systemVersion": "13",
+            "timezone": 8,
+            "versionCode": "404080400",
+        },
+        separators=(",", ":"),
+    )
+    headers = {
+        "content-type": "application/json",
+        "accept-encoding": "gzip",
+        "user-agent": "okhttp/4.12.0",
+        "request-time": str(int(time.time() * 1000)),
+        "yfheader": yfheader,
+    }
+    response = requests.post(f"{MOBILE_BASE}/coros/user/login", json=payload, headers=headers, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("result") != "0000":
+        fail(f"Mobile login failed: {data.get('message', data)}")
+    token = data.get("data", {}).get("accessToken")
+    if not token:
+        fail("Mobile login succeeded but accessToken missing")
+    return token
+
+
+def parse_date_to_ms(date_str):
+    """Convert YYYYMMDD string to Unix timestamp in milliseconds."""
+    if not date_str:
+        return None
+    text = str(date_str)
+    if len(text) == 8 and text.isdigit():
+        dt = datetime.strptime(text, "%Y%m%d")
+        return int(dt.timestamp() * 1000)
+    return int(float(date_str))  # already a number
+
+
+def format_date(date_value):
+    if not date_value:
+        return "-"
+    text = str(date_value)
+    if len(text) == 8 and text.isdigit():
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    return text
+
+
+def format_duration(seconds):
+    if seconds is None:
+        return "-"
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def format_minutes(minutes):
+    if minutes is None:
+        return "-"
+    hours = int(minutes) // 60
+    mins = int(minutes) % 60
+    if hours:
+        return f"{hours}h{mins:02d}m"
+    return f"{mins}m"
+
+
+def format_distance(meters):
+    if meters is None:
+        return "-"
+    return f"{float(meters)/1000:.2f} km"
+
+
+def cmd_activities(args):
+    payload = web_get("/activity/query", {"size": args.size, "pageNumber": args.page})
+    items = payload.get("data", {}).get("dataList", [])
+    if not items:
+        print("没有活动记录")
+        return
+    print(f"共 {payload.get('data', {}).get('count', len(items))} 条，当前第 {payload.get('data', {}).get('pageNumber', args.page)} 页")
+    for index, item in enumerate(items, 1):
+        print(f"\n--- 活动 {index} ---")
+        print(f"名称: {item.get('name', '-')}")
+        print(f"日期: {format_date(item.get('date'))}")
+        print(f"距离: {format_distance(item.get('distance'))}")
+        print(f"时长: {format_duration(item.get('totalTime'))}")
+        print(f"平均心率: {item.get('avgHr', '-')}")
+        print(f"最高心率: {item.get('maxHr', '-')}")
+        print(f"训练负荷: {item.get('trainingLoad', '-')}")
+        print(f"labelId: {item.get('labelId', '-')}")
+
+
+def cmd_activity_detail(args):
+    account_payload = web_get("/account/query")
+    user_id = account_payload.get("data", {}).get("userId")
+    if not user_id:
+        fail("Cannot resolve userId from /account/query")
+    sport_type = args.sport_type
+    if sport_type is None:
+        activities_payload = web_get("/activity/query", {"size": 50, "pageNumber": 1})
+        for item in activities_payload.get("data", {}).get("dataList", []):
+            if str(item.get("labelId")) == str(args.label_id):
+                sport_type = item.get("sportType")
+                break
+    if sport_type is None:
+        fail("sportType required; could not infer it from recent activity list")
+    headers = {**WEB_HEADERS, "accesstoken": WEB_TOKEN}
+    response = requests.post(
+        f"{WEB_BASE}/activity/detail/query",
+        data={"labelId": args.label_id, "userId": user_id, "sportType": str(sport_type)},
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if result.get("result") != "0000":
+        fail(f"Activity detail API error: {result.get('message', result)}")
+    data = result.get("data", {})
+    for key in ("graphList", "frequencyList", "gpsLightDuration"):
+        data.pop(key, None)
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def cmd_schedule(args):
+    payload = web_get("/training/schedule/query", {"startDate": args.start, "endDate": args.end, "supportRestExercise": 1})
+    data = payload.get("data", {})
+    print(f"计划: {data.get('name', '-')}")
+    print(f"周期: {format_date(data.get('startDay'))} ~ {format_date(data.get('endDay'))}")
+    entities = data.get("entities", [])
+    for index, item in enumerate(entities, 1):
+        print(f"\n--- 日程 {index} ---")
+        print(f"日期: {format_date(item.get('happenDay'))}")
+        print(f"Day No: {item.get('dayNo', '-')}")
+        print(f"状态: {item.get('executeStatus', '-')}")
+        print(f"planProgramId: {item.get('planProgramId', '-')}")
+
+
+def cmd_hrv(args):
+    payload = web_get("/dashboard/query")
+    hrv = payload.get("data", {}).get("summaryInfo", {}).get("sleepHrvData", {})
+    print(f"最近 HRV: {hrv.get('avgSleepHrv', '-')}")
+    print(f"HRV 基线: {hrv.get('sleepHrvBase', '-')}")
+    print(f"HRV 波动: {hrv.get('sleepHrvSd', '-')}")
+    for item in hrv.get("sleepHrvList", []):
+        print(f"{format_date(item.get('happenDay'))}: avg={item.get('avgSleepHrv', '-')} base={item.get('sleepHrvBase', '-')}")
+
+
+def cmd_daily_metrics(args):
+    payload = web_get("/analyse/dayDetail/query", {"startDay": args.start, "endDay": args.end})
+    print(json.dumps(payload.get("data", {}), ensure_ascii=False, indent=2))
+
+
+def cmd_auth_mobile(args):
+    token = mobile_login(args.email, args.password)
+    print(token)
+
+
+def cmd_sleep(args):
+    payload = mobile_post(
+        "/coros/data/statistic/daily",
+        {
+            "allDeviceSleep": 1,
+            "dataType": [5],
+            "dataVersion": 0,
+            "startTime": parse_date_to_ms(args.start),
+            "endTime": parse_date_to_ms(args.end),
+            "statisticType": 1,
+        },
+    )
+    items = payload.get("data", {}).get("statisticData", {}).get("dayDataList", [])
+    if not items:
+        print("没有睡眠记录")
+        return
+    for index, item in enumerate(items, 1):
+        sleep = item.get("sleepData", {})
+        print(f"\n--- 睡眠 {index} ---")
+        print(f"日期: {format_date(item.get('happenDay'))}")
+        print(f"总睡眠: {format_minutes(sleep.get('totalSleepTime'))}")
+        print(f"深睡: {format_minutes(sleep.get('deepTime'))}")
+        print(f"浅睡: {format_minutes(sleep.get('lightTime'))}")
+        print(f"REM: {format_minutes(sleep.get('eyeTime'))}")
+        print(f"清醒: {format_minutes(sleep.get('wakeTime'))}")
+        print(f"小睡: {format_minutes(sleep.get('shortSleepTime'))}")
+        print(f"平均心率: {sleep.get('avgHeartRate', '-')}")
+        print(f"最低心率: {sleep.get('minHeartRate', '-')}")
+        print(f"最高心率: {sleep.get('maxHeartRate', '-')}")
+        print(f"睡眠评分: {item.get('performance', '-')}")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description="COROS dual-channel data tool")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    activities = sub.add_parser("activities")
+    activities.add_argument("--size", type=int, default=10)
+    activities.add_argument("--page", type=int, default=1)
+    activities.set_defaults(func=cmd_activities)
+
+    activity_detail = sub.add_parser("activity-detail")
+    activity_detail.add_argument("--label-id", required=True)
+    activity_detail.add_argument("--sport-type", type=int)
+    activity_detail.set_defaults(func=cmd_activity_detail)
+
+    schedule = sub.add_parser("schedule")
+    schedule.add_argument("--start", required=True)
+    schedule.add_argument("--end", required=True)
+    schedule.set_defaults(func=cmd_schedule)
+
+    hrv = sub.add_parser("hrv")
+    hrv.set_defaults(func=cmd_hrv)
+
+    daily = sub.add_parser("daily-metrics")
+    daily.add_argument("--start", required=True)
+    daily.add_argument("--end", required=True)
+    daily.set_defaults(func=cmd_daily_metrics)
+
+    auth_mobile = sub.add_parser("auth-mobile")
+    auth_mobile.add_argument("--email", required=True)
+    auth_mobile.add_argument("--password", required=True)
+    auth_mobile.set_defaults(func=cmd_auth_mobile)
+
+    sleep = sub.add_parser("sleep")
+    sleep.add_argument("--start", required=True)
+    sleep.add_argument("--end", required=True)
+    sleep.set_defaults(func=cmd_sleep)
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,5 @@
+.coros.env
+.coros_web_session
+__pycache__/
+*.pyc
+node_modules/
