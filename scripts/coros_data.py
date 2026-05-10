@@ -157,7 +157,10 @@ def md5_hex(value):
 
 
 def mobile_encrypt(plaintext, app_key):
-    from Cryptodome.Cipher import AES
+    try:
+        from Cryptodome.Cipher import AES
+    except ModuleNotFoundError:
+        fail("Missing Python dependency pycryptodomex; install it with: pip install pycryptodomex")
 
     key = app_key.encode("ascii")
     data = plaintext.encode("utf-8")

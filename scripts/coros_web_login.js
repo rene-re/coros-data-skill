@@ -16,10 +16,20 @@
  *   - This script handles the privacy policy checkbox which blocks normal login automation
  */
 
-const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline/promises');
+
+let chromium;
+try {
+  ({ chromium } = require('playwright'));
+} catch (error) {
+  if (error.code === 'MODULE_NOT_FOUND') {
+    console.error('Missing Node dependency playwright; install it with: cd scripts && npm install');
+    process.exit(1);
+  }
+  throw error;
+}
 
 const DEFAULT_EMAIL = process.env.COROS_EMAIL;
 const DEFAULT_PASSWORD = process.env.COROS_PASSWORD;
@@ -76,6 +86,18 @@ function writeEnvValue(key, value) {
   writeSecretFile(ENV_FILE, `${nextLines.join('\n').replace(/\s+$/u, '')}\n`);
 }
 
+function formatLoginError(error) {
+  const message = String(error && error.message ? error.message : error);
+  if (message.includes("Executable doesn't exist")) {
+    return 'Playwright browser is missing; run: cd scripts && npx playwright install chromium';
+  }
+  const libraryMatch = message.match(/error while loading shared libraries: ([^:]+):/);
+  if (libraryMatch) {
+    return `Playwright browser dependency missing (${libraryMatch[1]}); run: cd scripts && npx playwright install-deps chromium`;
+  }
+  return message;
+}
+
 async function promptHidden(query) {
   if (!process.stdin.isTTY) {
     throw new Error('Missing COROS_PASSWORD; set it in the environment or run interactively');
@@ -111,7 +133,8 @@ async function login(email, password) {
   }
   const browser = await chromium.launch({
     headless: true,
-    args: launchArgs
+    args: launchArgs,
+    chromiumSandbox: !envTruthy('COROS_PLAYWRIGHT_NO_SANDBOX')
   });
 
   try {
@@ -200,9 +223,9 @@ if (require.main === module) {
       return token;
     })
     .catch(err => {
-      console.error('Login error:', err.message);
+      console.error('Login error:', formatLoginError(err));
       process.exit(1);
     });
 }
 
-module.exports = { login, writeEnvValue, writeSecretFile };
+module.exports = { login, writeEnvValue, writeSecretFile, formatLoginError };
