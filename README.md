@@ -11,7 +11,7 @@ This repository is designed for personal analysis workflows and OpenClaw skill u
 
 The bundled script `scripts/coros_data.py` talks to two different COROS API surfaces:
 
-- **Web API** (`teamapi.coros.com`)
+- **Web API** (`teameuapi.coros.com` by default; `teamapi.coros.com` is also allowed)
   - Best for training-oriented data
   - Commands: `activities`, `activity-detail`, `schedule`, `hrv`, `daily-metrics`
 - **Mobile API** (`api.coros.com`)
@@ -58,7 +58,7 @@ Run the combined auth command to obtain and store both tokens:
 python3 scripts/coros_data.py auth --email you@example.com --write-env
 ```
 
-The command prompts for the password, mints `COROS_MOBILE_TOKEN`, obtains `COROS_WEB_TOKEN` through the Playwright helper, and writes both tokens to `.coros.env` only after both steps succeed.
+The command prompts for the password, obtains `COROS_WEB_TOKEN` through the Playwright helper, then attempts to mint `COROS_MOBILE_TOKEN`. If mobile auth is not accepted for the account locale, the web token is still written and the command prints a warning.
 
 ### 1) Web API auth
 
@@ -103,11 +103,18 @@ export COROS_MOBILE_TOKEN='your_mobile_token_here'
 Optional overrides:
 
 ```bash
-export COROS_WEB_BASE='https://teamapi.coros.com'
+export COROS_WEB_BASE='https://teameuapi.coros.com'
 export COROS_MOBILE_BASE='https://api.coros.com'
+# Set only if you have confirmed the mobile app payload for your account.
+export COROS_MOBILE_REGION='<captured-mobile-region-tuple>'
+export COROS_MOBILE_LANGUAGE='en-US'
 ```
 
-Only `teamapi.coros.com` and `api.coros.com` are accepted by default. Set `COROS_ALLOW_CUSTOM_BASE_URL=1` only when you intentionally want to send credentials to another host.
+Use `https://teamapi.coros.com` instead of `https://teameuapi.coros.com` only when the non-EU Training Hub API is the right host for the account.
+
+Only `teameuapi.coros.com`, `teamapi.coros.com`, and `api.coros.com` are accepted by default. Set `COROS_ALLOW_CUSTOM_BASE_URL=1` only when you intentionally want to send credentials to another host.
+
+`COROS_MOBILE_REGION` is optional mobile-login client metadata, not the Training Hub API host. Do not set it unless you have captured or confirmed the tuple used by the COROS mobile app for your account.
 
 Load env before running:
 
@@ -147,6 +154,12 @@ Mobile-only refresh command:
 
 ```bash
 python3 scripts/coros_data.py auth-mobile --email you@example.com --write-env
+```
+
+If the mobile endpoint rejects the account locale, retry only with a region tuple you have captured or confirmed from the mobile app:
+
+```bash
+python3 scripts/coros_data.py auth-mobile --email you@example.com --mobile-region '<captured-mobile-region-tuple>' --write-env
 ```
 
 Avoid passing passwords as command-line arguments; they can leak through shell history and process listings.

@@ -15,9 +15,11 @@ from urllib.parse import urlparse
 
 import requests
 
-DEFAULT_WEB_BASE = "https://teamapi.coros.com"
+DEFAULT_WEB_BASE = "https://teameuapi.coros.com"
 DEFAULT_MOBILE_BASE = "https://api.coros.com"
-ALLOWED_WEB_HOSTS = {"teamapi.coros.com"}
+DEFAULT_MOBILE_REGION = ""
+DEFAULT_MOBILE_LANGUAGE = "en-US"
+ALLOWED_WEB_HOSTS = {"teamapi.coros.com", "teameuapi.coros.com"}
 ALLOWED_MOBILE_HOSTS = {"api.coros.com"}
 ENV_FILE = Path(__file__).resolve().parents[1] / ".coros.env"
 WEB_LOGIN_SCRIPT = Path(__file__).resolve().parent / "coros_web_login.js"
@@ -55,12 +57,14 @@ WEB_TOKEN = os.environ.get("COROS_WEB_TOKEN") or os.environ.get("COROS_ACCESS_TO
 MOBILE_TOKEN = os.environ.get("COROS_MOBILE_TOKEN")
 MOBILE_EMAIL = os.environ.get("COROS_MOBILE_EMAIL")
 MOBILE_PASSWORD = os.environ.get("COROS_MOBILE_PASSWORD")
+MOBILE_REGION = os.environ.get("COROS_MOBILE_REGION", DEFAULT_MOBILE_REGION).strip()
+MOBILE_LANGUAGE = os.environ.get("COROS_MOBILE_LANGUAGE", DEFAULT_MOBILE_LANGUAGE)
 MOBILE_LOGIN_IV = b"weloop3_2015_03#"
 
 WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
     "Origin": "https://training.coros.com",
     "Referer": "https://training.coros.com/",
 }
@@ -233,7 +237,14 @@ def mobile_encrypt(plaintext, app_key):
     return base64.b64encode(cipher.encrypt(padded)).decode("ascii")
 
 
-def mobile_login(email, password):
+class AuthFailure(Exception):
+    pass
+
+
+def mobile_login(email, password, region=None, language=None, fail_on_error=True):
+    region = MOBILE_REGION if region is None else region
+    region = region.strip() if isinstance(region, str) else region
+    language = language or MOBILE_LANGUAGE
     app_key = str(random.randint(1_000_000_000_000_000, 9_999_999_999_999_999))
     payload = {
         "account": mobile_encrypt(email, app_key) + "\n",
@@ -243,14 +254,15 @@ def mobile_login(email, password):
         "hasHrCalibrated": 0,
         "kbValidity": 0,
         "pwd": mobile_encrypt(md5_hex(password), app_key) + "\n",
-        "region": "310|Asia/Shanghai|CN",
         "skipValidation": False,
     }
+    if region:
+        payload["region"] = region
     yfheader = json.dumps(
         {
             "appVersion": 1125917087236096,
             "clientType": 1,
-            "language": "zh-CN",
+            "language": language,
             "mobileName": "sdk_gphone64_arm64,google,Google",
             "releaseType": 1,
             "systemVersion": "13",
@@ -270,10 +282,16 @@ def mobile_login(email, password):
     response.raise_for_status()
     data = response.json()
     if data.get("result") != "0000":
-        fail(f"Mobile login failed: {data.get('message', data)}")
+        message = f"Mobile login failed: {data.get('message', data)}"
+        if fail_on_error:
+            fail(message)
+        raise AuthFailure(message)
     token = data.get("data", {}).get("accessToken")
     if not token:
-        fail("Mobile login succeeded but accessToken missing")
+        message = "Mobile login succeeded but accessToken missing"
+        if fail_on_error:
+            fail(message)
+        raise AuthFailure(message)
     return token
 
 
@@ -406,7 +424,7 @@ def cmd_daily_metrics(args):
 
 def cmd_auth_mobile(args):
     email, password = resolve_auth_inputs(args)
-    token = mobile_login(email, password)
+    token = mobile_login(email, password, region=args.mobile_region, language=args.mobile_language)
     if args.write_env:
         write_env_value("COROS_MOBILE_TOKEN", token)
         print(f"Wrote COROS_MOBILE_TOKEN to {ENV_FILE}", file=sys.stderr)
@@ -418,16 +436,29 @@ def cmd_auth_mobile(args):
 
 def cmd_auth(args):
     email, password = resolve_auth_inputs(args)
-    mobile_token = mobile_login(email, password)
     web_token = web_login(email, password)
+    tokens = {"COROS_WEB_TOKEN": web_token}
+    mobile_error = None
+    try:
+        tokens["COROS_MOBILE_TOKEN"] = mobile_login(
+            email,
+            password,
+            region=args.mobile_region,
+            language=args.mobile_language,
+            fail_on_error=False,
+        )
+    except AuthFailure as error:
+        mobile_error = str(error)
 
     if args.write_env:
-        write_env_values({"COROS_MOBILE_TOKEN": mobile_token, "COROS_WEB_TOKEN": web_token})
-        print(f"Wrote COROS_MOBILE_TOKEN and COROS_WEB_TOKEN to {ENV_FILE}", file=sys.stderr)
+        write_env_values(tokens)
+        print(f"Wrote {', '.join(tokens)} to {ENV_FILE}", file=sys.stderr)
     if args.print_token:
-        print(json.dumps({"COROS_MOBILE_TOKEN": mobile_token, "COROS_WEB_TOKEN": web_token}, indent=2))
+        print(json.dumps(tokens, indent=2))
+    if mobile_error:
+        print(f"Warning: {mobile_error}; web token was still obtained.", file=sys.stderr)
     if not args.write_env and not args.print_token:
-        print("COROS tokens obtained. Re-run with --write-env to store them or --print-token to display them.", file=sys.stderr)
+        print("COROS auth completed. Re-run with --write-env to store tokens or --print-token to display them.", file=sys.stderr)
 
 
 def cmd_sleep(args):
@@ -492,6 +523,8 @@ def build_parser():
     auth = sub.add_parser("auth")
     auth.add_argument("--email")
     auth.add_argument("--password", help="Deprecated: prefer prompt input")
+    auth.add_argument("--mobile-region", default=MOBILE_REGION)
+    auth.add_argument("--mobile-language", default=MOBILE_LANGUAGE)
     auth.add_argument("--print-token", action="store_true")
     auth.add_argument("--write-env", action="store_true")
     auth.set_defaults(func=cmd_auth)
@@ -499,6 +532,8 @@ def build_parser():
     auth_mobile = sub.add_parser("auth-mobile")
     auth_mobile.add_argument("--email")
     auth_mobile.add_argument("--password", help="Deprecated: prefer COROS_MOBILE_PASSWORD or interactive prompt")
+    auth_mobile.add_argument("--mobile-region", default=MOBILE_REGION)
+    auth_mobile.add_argument("--mobile-language", default=MOBILE_LANGUAGE)
     auth_mobile.add_argument("--print-token", action="store_true")
     auth_mobile.add_argument("--write-env", action="store_true")
     auth_mobile.set_defaults(func=cmd_auth_mobile)

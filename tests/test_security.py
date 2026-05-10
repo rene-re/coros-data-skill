@@ -44,19 +44,23 @@ def run_command(args, extra_env=None):
 
 
 class SecurityConfigTests(unittest.TestCase):
-    def test_default_endpoints_are_global_coros_hosts(self):
+    def test_default_endpoints_are_known_coros_hosts(self):
         result = run_help({})
         self.assertEqual(result.returncode, 0, result.stderr)
 
         sys.path.insert(0, str(ROOT / "scripts"))
         coros_data = importlib.import_module("coros_data")
-        self.assertEqual(coros_data.WEB_BASE, "https://teamapi.coros.com")
+        self.assertEqual(coros_data.WEB_BASE, "https://teameuapi.coros.com")
         self.assertEqual(coros_data.MOBILE_BASE, "https://api.coros.com")
+        self.assertEqual(coros_data.MOBILE_REGION, "")
+        self.assertEqual(coros_data.MOBILE_LANGUAGE, "en-US")
 
     def test_custom_web_base_is_rejected_without_explicit_opt_in(self):
         result = run_help({"COROS_WEB_BASE": "https://example.com"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("COROS_WEB_BASE host must be teamapi.coros.com", result.stderr)
+        self.assertIn("COROS_WEB_BASE host must be", result.stderr)
+        self.assertIn("teamapi.coros.com", result.stderr)
+        self.assertIn("teameuapi.coros.com", result.stderr)
 
     def test_custom_mobile_base_is_rejected_without_explicit_opt_in(self):
         result = run_help({"COROS_MOBILE_BASE": "https://example.com"})
@@ -123,6 +127,7 @@ class SecurityConfigTests(unittest.TestCase):
         result = run_command(["auth", "--help"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--write-env", result.stdout)
+        self.assertIn("--mobile-region", result.stdout)
 
     def test_combined_auth_rejects_missing_email(self):
         result = run_command(["auth", "--password", "fake"])
@@ -139,6 +144,8 @@ class StaticSafetyTests(unittest.TestCase):
         self.assertNotIn("teamcnapi", text)
         self.assertNotIn("apicn", text)
         self.assertNotIn("trainingcn", text)
+        self.assertNotIn("Asia/Shanghai|CN", text)
+        self.assertNotIn("Europe/Berlin|DE", text)
 
 
 if __name__ == "__main__":
