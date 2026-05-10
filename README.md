@@ -118,6 +118,8 @@ COROS_EMAIL='you@example.com' node coros_web_login.js --write-env
 
 Add `--print-token` only when you intentionally need to display the token.
 
+Chromium sandboxing is disabled by default for constrained VM compatibility. Set `COROS_PLAYWRIGHT_SANDBOX=1` only on hosts that support Chromium sandboxing.
+
 ### Mobile token
 
 You can either:

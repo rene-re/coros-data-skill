@@ -39,6 +39,8 @@ This writes the token to `{baseDir}/.coros.env` with restrictive file permission
 
 Do not pass passwords as positional command-line arguments.
 
+Chromium sandboxing is disabled by default for constrained VM compatibility. Set `COROS_PLAYWRIGHT_SANDBOX=1` only on hosts that support Chromium sandboxing.
+
 The script:
 1. Launches a headless Chromium browser
 2. Navigates to the COROS Training Hub login page

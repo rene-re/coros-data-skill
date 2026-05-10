@@ -13,6 +13,8 @@
  * Notes:
  *   - The CPL-coros-token cookie value is the COROS_WEB_TOKEN needed for web API calls
  *   - The web token expires much slower than the mobile token
+ *   - Chromium sandboxing is disabled by default for constrained VM compatibility
+ *   - Set COROS_PLAYWRIGHT_SANDBOX=1 to opt back into sandboxing on capable hosts
  *   - This script handles the privacy policy checkbox which blocks normal login automation
  */
 
@@ -127,14 +129,15 @@ async function promptHidden(query) {
 }
 
 async function login(email, password) {
+  const useSandbox = envTruthy('COROS_PLAYWRIGHT_SANDBOX');
   const launchArgs = ['--disable-dev-shm-usage'];
-  if (envTruthy('COROS_PLAYWRIGHT_NO_SANDBOX')) {
+  if (!useSandbox) {
     launchArgs.push('--no-sandbox');
   }
   const browser = await chromium.launch({
     headless: true,
     args: launchArgs,
-    chromiumSandbox: !envTruthy('COROS_PLAYWRIGHT_NO_SANDBOX')
+    chromiumSandbox: useSandbox
   });
 
   try {
