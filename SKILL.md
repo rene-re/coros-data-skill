@@ -16,26 +16,28 @@ Use the bundled script at `{baseDir}/scripts/coros_data.py`.
 ## Auth model
 
 - Load environment from `{baseDir}/.coros.env` when present.
-- Web API defaults to `https://teameuapi.coros.com`; `https://teamapi.coros.com` is also allowed.
-- Mobile API defaults to `https://api.coros.com`.
+- Region defaults to `auto`, which resolves to EU unless web auth detects another supported region.
+- EU uses web `https://teameuapi.coros.com` and mobile `https://apieu.coros.com`.
+- US/global uses web `https://teamapi.coros.com` and mobile `https://api.coros.com`.
 - Custom API bases require `COROS_ALLOW_CUSTOM_BASE_URL=1`.
 - Web API uses `COROS_WEB_TOKEN`.
 - Mobile API uses `COROS_MOBILE_TOKEN`.
 - Mobile login uses `COROS_MOBILE_LANGUAGE=en-US` by default. `COROS_MOBILE_REGION` is optional client metadata; set it only when captured or confirmed from the COROS mobile app.
 - Use `python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env` for normal setup.
-- Use `auth-mobile` only for mobile-token refreshes.
+- Use `auth-mobile --region eu` only for explicit mobile-token refreshes.
+- Use `mobile-diagnose` for fake-credential endpoint probes.
 - **Web token** — `COROS_WEB_TOKEN` is obtained through Playwright browser login inside the combined auth command.
 - If neither token nor credentials are present, mobile commands cannot run.
 
 ### Getting Tokens
 
-COROS requires two tokens internally. Use the combined setup command to obtain both:
+COROS uses separate web and mobile tokens internally. Use the combined setup command to obtain the web token:
 
 ```bash
 python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env
 ```
 
-This prompts for the password, obtains `COROS_WEB_TOKEN`, attempts to obtain `COROS_MOBILE_TOKEN`, and writes available tokens to `{baseDir}/.coros.env` with restrictive file permissions. To display tokens for manual handling, add `--print-token`.
+This prompts for the password, obtains `COROS_WEB_TOKEN`, detects the account region when possible, and writes `COROS_REGION` plus the web token to `{baseDir}/.coros.env` with restrictive file permissions. To display tokens for manual handling, add `--print-token`.
 
 Do not pass passwords as positional command-line arguments.
 
@@ -47,8 +49,10 @@ The combined command:
 3. Fills credentials and **checks the hidden privacy policy checkbox** (which blocks naive automation)
 4. Submits the form and waits for navigation
 5. Extracts the `CPL-coros-token` cookie (the web API access token)
-6. Attempts to mint a mobile token; this channel is optional and may require captured mobile client metadata
-7. Writes the web token even if mobile auth is unavailable for the account
+6. Detects the account region from saved browser cookies when available
+7. Writes `COROS_REGION` and the web token
+
+Add `--with-mobile` only when the user explicitly wants mobile API login attempted. Mobile login can log out the COROS phone app.
 
 For web-only refreshes, use the Playwright script:
 
@@ -74,6 +78,12 @@ set -a && . {baseDir}/.coros.env && set +a
 
 # Setup auth tokens
 python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env
+
+# Mobile token, explicit because it may affect the phone app session
+python3 {baseDir}/scripts/coros_data.py auth-mobile --email <email> --region eu --write-env
+
+# Endpoint diagnostics without storing tokens
+python3 {baseDir}/scripts/coros_data.py mobile-diagnose
 
 # Activities (uses COROS_WEB_TOKEN)
 python3 {baseDir}/scripts/coros_data.py activities --size 10

@@ -15,12 +15,35 @@ from urllib.parse import urlparse
 
 import requests
 
-DEFAULT_WEB_BASE = "https://teameuapi.coros.com"
-DEFAULT_MOBILE_BASE = "https://api.coros.com"
+DEFAULT_REGION = "auto"
 DEFAULT_MOBILE_REGION = ""
 DEFAULT_MOBILE_LANGUAGE = "en-US"
-ALLOWED_WEB_HOSTS = {"teamapi.coros.com", "teameuapi.coros.com"}
-ALLOWED_MOBILE_HOSTS = {"api.coros.com"}
+REGION_PROFILES = {
+    "eu": {
+        "web_base": "https://teameuapi.coros.com",
+        "mobile_base": "https://apieu.coros.com",
+        "mobile_client_region": "310|Europe/Berlin|US",
+        "mobile_timezone": 4,
+    },
+    "us": {
+        "web_base": "https://teamapi.coros.com",
+        "mobile_base": "https://api.coros.com",
+        "mobile_client_region": "310|Europe/Berlin|US",
+        "mobile_timezone": 4,
+    },
+    "cn": {
+        "web_base": "https://teamcnapi.coros.com",
+        "mobile_base": "https://apicn.coros.com",
+        "mobile_client_region": "",
+        "mobile_timezone": 8,
+    },
+}
+REGION_ALIASES = {"asia": "cn", "global": "us", "en": "us"}
+WEB_REGION_COOKIE = {"3": "eu"}
+DEFAULT_WEB_BASE = REGION_PROFILES["eu"]["web_base"]
+DEFAULT_MOBILE_BASE = REGION_PROFILES["eu"]["mobile_base"]
+ALLOWED_WEB_HOSTS = {urlparse(profile["web_base"]).hostname for profile in REGION_PROFILES.values()}
+ALLOWED_MOBILE_HOSTS = {urlparse(profile["mobile_base"]).hostname for profile in REGION_PROFILES.values()}
 ENV_FILE = Path(__file__).resolve().parents[1] / ".coros.env"
 WEB_LOGIN_SCRIPT = Path(__file__).resolve().parent / "coros_web_login.js"
 
@@ -47,9 +70,26 @@ def normalize_base_url(value, var_name, allowed_hosts):
     return value.rstrip("/")
 
 
-WEB_BASE = normalize_base_url(os.environ.get("COROS_WEB_BASE", DEFAULT_WEB_BASE), "COROS_WEB_BASE", ALLOWED_WEB_HOSTS)
+def normalize_region(value, default="eu"):
+    region = (value or default).strip().lower()
+    if region == "auto":
+        return default
+    region = REGION_ALIASES.get(region, region)
+    if region not in REGION_PROFILES:
+        allowed = ", ".join(["auto", *sorted(REGION_PROFILES)])
+        fail(f"COROS_REGION must be one of {allowed}")
+    return region
+
+
+REQUESTED_REGION = os.environ.get("COROS_REGION", DEFAULT_REGION).strip().lower() or DEFAULT_REGION
+ACTIVE_REGION = normalize_region(REQUESTED_REGION)
+WEB_BASE = normalize_base_url(
+    os.environ.get("COROS_WEB_BASE", REGION_PROFILES[ACTIVE_REGION]["web_base"]),
+    "COROS_WEB_BASE",
+    ALLOWED_WEB_HOSTS,
+)
 MOBILE_BASE = normalize_base_url(
-    os.environ.get("COROS_MOBILE_BASE", DEFAULT_MOBILE_BASE),
+    os.environ.get("COROS_MOBILE_BASE", REGION_PROFILES[ACTIVE_REGION]["mobile_base"]),
     "COROS_MOBILE_BASE",
     ALLOWED_MOBILE_HOSTS,
 )
@@ -162,6 +202,25 @@ def web_login(email, password):
     return token
 
 
+def detect_web_session_region(session_file=WEB_LOGIN_SCRIPT.parents[1] / ".coros_web_session"):
+    if not session_file.exists():
+        return None
+    try:
+        data = json.loads(session_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    cookies = data.get("cookies") or []
+    for cookie in cookies:
+        if cookie.get("name") == "CPL-coros-region":
+            region = WEB_REGION_COOKIE.get(str(cookie.get("value", "")))
+            if region:
+                return region
+    domains = {cookie.get("domain", "") for cookie in cookies}
+    if any("trainingeu.coros.com" in domain for domain in domains):
+        return "eu"
+    return None
+
+
 def require_web_token():
     if not WEB_TOKEN:
         fail("Missing COROS_WEB_TOKEN (or COROS_ACCESS_TOKEN) for web API")
@@ -202,12 +261,12 @@ def web_post(path, payload=None, params=None):
     return data
 
 
-def mobile_post(path, payload=None, params=None):
+def mobile_post(path, payload=None, params=None, api_base=None):
     token = resolve_mobile_token()
     headers = {"Content-Type": "application/json", "accesstoken": token, "User-Agent": "okhttp/4.9.0"}
     query = dict(params or {})
     query.setdefault("accessToken", token)
-    response = requests.post(f"{MOBILE_BASE}{path}", params=query, json=payload or {}, headers=headers, timeout=30)
+    response = requests.post(f"{api_base or MOBILE_BASE}{path}", params=query, json=payload or {}, headers=headers, timeout=30)
     response.raise_for_status()
     data = response.json()
     if data.get("result") != "0000":
@@ -241,10 +300,13 @@ class AuthFailure(Exception):
     pass
 
 
-def mobile_login(email, password, region=None, language=None, fail_on_error=True):
+def mobile_login(email, password, region=None, language=None, timezone=None, api_base=None, fail_on_error=True):
     region = MOBILE_REGION if region is None else region
+    if not region:
+        region = REGION_PROFILES[ACTIVE_REGION].get("mobile_client_region", "")
     region = region.strip() if isinstance(region, str) else region
     language = language or MOBILE_LANGUAGE
+    timezone = REGION_PROFILES[ACTIVE_REGION].get("mobile_timezone", 4) if timezone is None else timezone
     app_key = str(random.randint(1_000_000_000_000_000, 9_999_999_999_999_999))
     payload = {
         "account": mobile_encrypt(email, app_key) + "\n",
@@ -266,7 +328,7 @@ def mobile_login(email, password, region=None, language=None, fail_on_error=True
             "mobileName": "sdk_gphone64_arm64,google,Google",
             "releaseType": 1,
             "systemVersion": "13",
-            "timezone": 8,
+            "timezone": timezone,
             "versionCode": "404080400",
         },
         separators=(",", ":"),
@@ -278,7 +340,7 @@ def mobile_login(email, password, region=None, language=None, fail_on_error=True
         "request-time": str(int(time.time() * 1000)),
         "yfheader": yfheader,
     }
-    response = requests.post(f"{MOBILE_BASE}/coros/user/login", json=payload, headers=headers, timeout=30)
+    response = requests.post(f"{api_base or MOBILE_BASE}/coros/user/login", json=payload, headers=headers, timeout=30)
     response.raise_for_status()
     data = response.json()
     if data.get("result") != "0000":
@@ -304,6 +366,18 @@ def parse_date_to_ms(date_str):
         dt = datetime.strptime(text, "%Y%m%d")
         return int(dt.timestamp() * 1000)
     return int(float(date_str))  # already a number
+
+
+def parse_date_to_yyyymmdd_int(date_str):
+    if not date_str:
+        return None
+    text = str(date_str)
+    if len(text) == 8 and text.isdigit():
+        datetime.strptime(text, "%Y%m%d")
+        return int(text)
+    if len(text) == 13 and text.isdigit():
+        return int(datetime.fromtimestamp(int(text) / 1000).strftime("%Y%m%d"))
+    fail("Expected date in YYYYMMDD format")
 
 
 def format_date(date_value):
@@ -347,18 +421,18 @@ def cmd_activities(args):
     payload = web_get("/activity/query", {"size": args.size, "pageNumber": args.page})
     items = payload.get("data", {}).get("dataList", [])
     if not items:
-        print("没有活动记录")
+        print("No activities found")
         return
-    print(f"共 {payload.get('data', {}).get('count', len(items))} 条，当前第 {payload.get('data', {}).get('pageNumber', args.page)} 页")
+    print(f"Total {payload.get('data', {}).get('count', len(items))} activities; page {payload.get('data', {}).get('pageNumber', args.page)}")
     for index, item in enumerate(items, 1):
-        print(f"\n--- 活动 {index} ---")
-        print(f"名称: {item.get('name', '-')}")
-        print(f"日期: {format_date(item.get('date'))}")
-        print(f"距离: {format_distance(item.get('distance'))}")
-        print(f"时长: {format_duration(item.get('totalTime'))}")
-        print(f"平均心率: {item.get('avgHr', '-')}")
-        print(f"最高心率: {item.get('maxHr', '-')}")
-        print(f"训练负荷: {item.get('trainingLoad', '-')}")
+        print(f"\n--- Activity {index} ---")
+        print(f"Name: {item.get('name', '-')}")
+        print(f"Date: {format_date(item.get('date'))}")
+        print(f"Distance: {format_distance(item.get('distance'))}")
+        print(f"Duration: {format_duration(item.get('totalTime'))}")
+        print(f"Average HR: {item.get('avgHr', '-')}")
+        print(f"Max HR: {item.get('maxHr', '-')}")
+        print(f"Training load: {item.get('trainingLoad', '-')}")
         print(f"labelId: {item.get('labelId', '-')}")
 
 
@@ -396,23 +470,23 @@ def cmd_activity_detail(args):
 def cmd_schedule(args):
     payload = web_get("/training/schedule/query", {"startDate": args.start, "endDate": args.end, "supportRestExercise": 1})
     data = payload.get("data", {})
-    print(f"计划: {data.get('name', '-')}")
-    print(f"周期: {format_date(data.get('startDay'))} ~ {format_date(data.get('endDay'))}")
+    print(f"Plan: {data.get('name', '-')}")
+    print(f"Period: {format_date(data.get('startDay'))} ~ {format_date(data.get('endDay'))}")
     entities = data.get("entities", [])
     for index, item in enumerate(entities, 1):
-        print(f"\n--- 日程 {index} ---")
-        print(f"日期: {format_date(item.get('happenDay'))}")
+        print(f"\n--- Schedule item {index} ---")
+        print(f"Date: {format_date(item.get('happenDay'))}")
         print(f"Day No: {item.get('dayNo', '-')}")
-        print(f"状态: {item.get('executeStatus', '-')}")
+        print(f"Status: {item.get('executeStatus', '-')}")
         print(f"planProgramId: {item.get('planProgramId', '-')}")
 
 
 def cmd_hrv(args):
     payload = web_get("/dashboard/query")
     hrv = payload.get("data", {}).get("summaryInfo", {}).get("sleepHrvData", {})
-    print(f"最近 HRV: {hrv.get('avgSleepHrv', '-')}")
-    print(f"HRV 基线: {hrv.get('sleepHrvBase', '-')}")
-    print(f"HRV 波动: {hrv.get('sleepHrvSd', '-')}")
+    print(f"Recent HRV: {hrv.get('avgSleepHrv', '-')}")
+    print(f"HRV baseline: {hrv.get('sleepHrvBase', '-')}")
+    print(f"HRV variation: {hrv.get('sleepHrvSd', '-')}")
     for item in hrv.get("sleepHrvList", []):
         print(f"{format_date(item.get('happenDay'))}: avg={item.get('avgSleepHrv', '-')} base={item.get('sleepHrvBase', '-')}")
 
@@ -424,10 +498,18 @@ def cmd_daily_metrics(args):
 
 def cmd_auth_mobile(args):
     email, password = resolve_auth_inputs(args)
-    token = mobile_login(email, password, region=args.mobile_region, language=args.mobile_language)
+    region = normalize_region(args.region)
+    token = mobile_login(
+        email,
+        password,
+        region=args.mobile_region or REGION_PROFILES[region].get("mobile_client_region", ""),
+        language=args.mobile_language,
+        timezone=REGION_PROFILES[region].get("mobile_timezone", 4),
+        api_base=REGION_PROFILES[region]["mobile_base"],
+    )
     if args.write_env:
-        write_env_value("COROS_MOBILE_TOKEN", token)
-        print(f"Wrote COROS_MOBILE_TOKEN to {ENV_FILE}", file=sys.stderr)
+        write_env_values({"COROS_REGION": region, "COROS_MOBILE_TOKEN": token})
+        print(f"Wrote COROS_REGION and COROS_MOBILE_TOKEN to {ENV_FILE}", file=sys.stderr)
     if args.print_token:
         print(token)
     if not args.write_env and not args.print_token:
@@ -437,18 +519,23 @@ def cmd_auth_mobile(args):
 def cmd_auth(args):
     email, password = resolve_auth_inputs(args)
     web_token = web_login(email, password)
-    tokens = {"COROS_WEB_TOKEN": web_token}
+    detected_region = detect_web_session_region()
+    region = normalize_region(args.region, default=detected_region or ACTIVE_REGION)
+    tokens = {"COROS_REGION": region, "COROS_WEB_TOKEN": web_token}
     mobile_error = None
-    try:
-        tokens["COROS_MOBILE_TOKEN"] = mobile_login(
-            email,
-            password,
-            region=args.mobile_region,
-            language=args.mobile_language,
-            fail_on_error=False,
-        )
-    except AuthFailure as error:
-        mobile_error = str(error)
+    if args.with_mobile:
+        try:
+            tokens["COROS_MOBILE_TOKEN"] = mobile_login(
+                email,
+                password,
+                region=args.mobile_region or REGION_PROFILES[region].get("mobile_client_region", ""),
+                language=args.mobile_language,
+                timezone=REGION_PROFILES[region].get("mobile_timezone", 4),
+                api_base=REGION_PROFILES[region]["mobile_base"],
+                fail_on_error=False,
+            )
+        except AuthFailure as error:
+            mobile_error = str(error)
 
     if args.write_env:
         write_env_values(tokens)
@@ -461,6 +548,47 @@ def cmd_auth(args):
         print("COROS auth completed. Re-run with --write-env to store tokens or --print-token to display them.", file=sys.stderr)
 
 
+def cmd_mobile_diagnose(args):
+    regions = [normalize_region(args.region)] if args.region != "all" else ["eu", "us"]
+    if args.include_cn and "cn" not in regions:
+        regions.append("cn")
+    print("Fake-credential mobile endpoint probe:")
+    for region in regions:
+        try:
+            mobile_login(
+                "fake@example.invalid",
+                "fake",
+                region=args.mobile_region or REGION_PROFILES[region].get("mobile_client_region", ""),
+                language=args.mobile_language,
+                timezone=REGION_PROFILES[region].get("mobile_timezone", 4),
+                api_base=REGION_PROFILES[region]["mobile_base"],
+                fail_on_error=False,
+            )
+            status = "unexpected success"
+        except AuthFailure as error:
+            status = str(error).replace("Mobile login failed: ", "")
+        print(f"- {region}: {REGION_PROFILES[region]['mobile_base']} -> {status}")
+
+    if not args.real_login:
+        return
+
+    email, password = resolve_auth_inputs(args)
+    region = normalize_region(args.real_region)
+    token = mobile_login(
+        email,
+        password,
+        region=args.mobile_region or REGION_PROFILES[region].get("mobile_client_region", ""),
+        language=args.mobile_language,
+        timezone=REGION_PROFILES[region].get("mobile_timezone", 4),
+        api_base=REGION_PROFILES[region]["mobile_base"],
+    )
+    if args.write_env:
+        write_env_values({"COROS_REGION": region, "COROS_MOBILE_TOKEN": token})
+        print(f"Wrote COROS_REGION and COROS_MOBILE_TOKEN to {ENV_FILE}", file=sys.stderr)
+    else:
+        print(f"Real mobile login succeeded for {region}; re-run with --write-env to store the token.", file=sys.stderr)
+
+
 def cmd_sleep(args):
     payload = mobile_post(
         "/coros/data/statistic/daily",
@@ -468,29 +596,29 @@ def cmd_sleep(args):
             "allDeviceSleep": 1,
             "dataType": [5],
             "dataVersion": 0,
-            "startTime": parse_date_to_ms(args.start),
-            "endTime": parse_date_to_ms(args.end),
+            "startTime": parse_date_to_yyyymmdd_int(args.start),
+            "endTime": parse_date_to_yyyymmdd_int(args.end),
             "statisticType": 1,
         },
     )
     items = payload.get("data", {}).get("statisticData", {}).get("dayDataList", [])
     if not items:
-        print("没有睡眠记录")
+        print("No sleep records found")
         return
     for index, item in enumerate(items, 1):
         sleep = item.get("sleepData", {})
-        print(f"\n--- 睡眠 {index} ---")
-        print(f"日期: {format_date(item.get('happenDay'))}")
-        print(f"总睡眠: {format_minutes(sleep.get('totalSleepTime'))}")
-        print(f"深睡: {format_minutes(sleep.get('deepTime'))}")
-        print(f"浅睡: {format_minutes(sleep.get('lightTime'))}")
+        print(f"\n--- Sleep {index} ---")
+        print(f"Date: {format_date(item.get('happenDay'))}")
+        print(f"Total sleep: {format_minutes(sleep.get('totalSleepTime'))}")
+        print(f"Deep sleep: {format_minutes(sleep.get('deepTime'))}")
+        print(f"Light sleep: {format_minutes(sleep.get('lightTime'))}")
         print(f"REM: {format_minutes(sleep.get('eyeTime'))}")
-        print(f"清醒: {format_minutes(sleep.get('wakeTime'))}")
-        print(f"小睡: {format_minutes(sleep.get('shortSleepTime'))}")
-        print(f"平均心率: {sleep.get('avgHeartRate', '-')}")
-        print(f"最低心率: {sleep.get('minHeartRate', '-')}")
-        print(f"最高心率: {sleep.get('maxHeartRate', '-')}")
-        print(f"睡眠评分: {item.get('performance', '-')}")
+        print(f"Awake: {format_minutes(sleep.get('wakeTime'))}")
+        print(f"Nap: {format_minutes(sleep.get('shortSleepTime'))}")
+        print(f"Average HR: {sleep.get('avgHeartRate', '-')}")
+        print(f"Min HR: {sleep.get('minHeartRate', '-')}")
+        print(f"Max HR: {sleep.get('maxHeartRate', '-')}")
+        print(f"Sleep score: {item.get('performance', '-')}")
 
 
 def build_parser():
@@ -523,6 +651,8 @@ def build_parser():
     auth = sub.add_parser("auth")
     auth.add_argument("--email")
     auth.add_argument("--password", help="Deprecated: prefer prompt input")
+    auth.add_argument("--region", default=REQUESTED_REGION, help="COROS account region: auto, eu, us, cn/asia")
+    auth.add_argument("--with-mobile", action="store_true", help="Also attempt mobile API login; this may log out the phone app")
     auth.add_argument("--mobile-region", default=MOBILE_REGION)
     auth.add_argument("--mobile-language", default=MOBILE_LANGUAGE)
     auth.add_argument("--print-token", action="store_true")
@@ -532,11 +662,24 @@ def build_parser():
     auth_mobile = sub.add_parser("auth-mobile")
     auth_mobile.add_argument("--email")
     auth_mobile.add_argument("--password", help="Deprecated: prefer COROS_MOBILE_PASSWORD or interactive prompt")
+    auth_mobile.add_argument("--region", default=REQUESTED_REGION, help="COROS account region: auto, eu, us, cn/asia")
     auth_mobile.add_argument("--mobile-region", default=MOBILE_REGION)
     auth_mobile.add_argument("--mobile-language", default=MOBILE_LANGUAGE)
     auth_mobile.add_argument("--print-token", action="store_true")
     auth_mobile.add_argument("--write-env", action="store_true")
     auth_mobile.set_defaults(func=cmd_auth_mobile)
+
+    mobile_diagnose = sub.add_parser("mobile-diagnose")
+    mobile_diagnose.add_argument("--region", default="all", help="Region to probe: all, eu, us, cn/asia")
+    mobile_diagnose.add_argument("--include-cn", action="store_true", help="Include China mobile endpoint in the fake-credential probe")
+    mobile_diagnose.add_argument("--real-login", action="store_true", help="Try a real mobile login after fake probes")
+    mobile_diagnose.add_argument("--real-region", default=REQUESTED_REGION, help="Region for --real-login")
+    mobile_diagnose.add_argument("--email")
+    mobile_diagnose.add_argument("--password", help="Deprecated: prefer prompt input")
+    mobile_diagnose.add_argument("--mobile-region", default=MOBILE_REGION)
+    mobile_diagnose.add_argument("--mobile-language", default=MOBILE_LANGUAGE)
+    mobile_diagnose.add_argument("--write-env", action="store_true")
+    mobile_diagnose.set_defaults(func=cmd_mobile_diagnose)
 
     sleep = sub.add_parser("sleep")
     sleep.add_argument("--start", required=True)

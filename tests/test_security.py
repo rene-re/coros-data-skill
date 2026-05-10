@@ -16,7 +16,7 @@ SCRIPT = ROOT / "scripts" / "coros_data.py"
 
 def run_help(extra_env):
     env = os.environ.copy()
-    for key in ("COROS_WEB_BASE", "COROS_MOBILE_BASE", "COROS_ALLOW_CUSTOM_BASE_URL"):
+    for key in ("COROS_REGION", "COROS_WEB_BASE", "COROS_MOBILE_BASE", "COROS_ALLOW_CUSTOM_BASE_URL"):
         env.pop(key, None)
     env.update(extra_env)
     return subprocess.run(
@@ -30,7 +30,7 @@ def run_help(extra_env):
 
 def run_command(args, extra_env=None):
     env = os.environ.copy()
-    for key in ("COROS_WEB_BASE", "COROS_MOBILE_BASE", "COROS_ALLOW_CUSTOM_BASE_URL"):
+    for key in ("COROS_REGION", "COROS_WEB_BASE", "COROS_MOBILE_BASE", "COROS_ALLOW_CUSTOM_BASE_URL"):
         env.pop(key, None)
     if extra_env:
         env.update(extra_env)
@@ -50,10 +50,22 @@ class SecurityConfigTests(unittest.TestCase):
 
         sys.path.insert(0, str(ROOT / "scripts"))
         coros_data = importlib.import_module("coros_data")
+        self.assertEqual(coros_data.REQUESTED_REGION, "auto")
+        self.assertEqual(coros_data.ACTIVE_REGION, "eu")
         self.assertEqual(coros_data.WEB_BASE, "https://teameuapi.coros.com")
-        self.assertEqual(coros_data.MOBILE_BASE, "https://api.coros.com")
+        self.assertEqual(coros_data.MOBILE_BASE, "https://apieu.coros.com")
         self.assertEqual(coros_data.MOBILE_REGION, "")
         self.assertEqual(coros_data.MOBILE_LANGUAGE, "en-US")
+
+    def test_region_endpoint_profiles_are_explicit(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        coros_data = importlib.import_module("coros_data")
+
+        self.assertEqual(coros_data.REGION_PROFILES["eu"]["web_base"], "https://teameuapi.coros.com")
+        self.assertEqual(coros_data.REGION_PROFILES["eu"]["mobile_base"], "https://apieu.coros.com")
+        self.assertEqual(coros_data.REGION_PROFILES["us"]["web_base"], "https://teamapi.coros.com")
+        self.assertEqual(coros_data.REGION_PROFILES["us"]["mobile_base"], "https://api.coros.com")
+        self.assertEqual(coros_data.normalize_region("asia"), "cn")
 
     def test_custom_web_base_is_rejected_without_explicit_opt_in(self):
         result = run_help({"COROS_WEB_BASE": "https://example.com"})
@@ -65,7 +77,9 @@ class SecurityConfigTests(unittest.TestCase):
     def test_custom_mobile_base_is_rejected_without_explicit_opt_in(self):
         result = run_help({"COROS_MOBILE_BASE": "https://example.com"})
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("COROS_MOBILE_BASE host must be api.coros.com", result.stderr)
+        self.assertIn("COROS_MOBILE_BASE host must be", result.stderr)
+        self.assertIn("api.coros.com", result.stderr)
+        self.assertIn("apieu.coros.com", result.stderr)
 
     def test_custom_base_is_allowed_with_explicit_opt_in(self):
         result = run_help(
@@ -127,12 +141,29 @@ class SecurityConfigTests(unittest.TestCase):
         result = run_command(["auth", "--help"])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--write-env", result.stdout)
+        self.assertIn("--region", result.stdout)
+        self.assertIn("--with-mobile", result.stdout)
         self.assertIn("--mobile-region", result.stdout)
+
+    def test_mobile_diagnose_command_is_registered(self):
+        result = run_command(["mobile-diagnose", "--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--real-login", result.stdout)
+        self.assertIn("--include-cn", result.stdout)
 
     def test_combined_auth_rejects_missing_email(self):
         result = run_command(["auth", "--password", "fake"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Missing COROS email", result.stderr)
+
+    def test_sleep_dates_use_yyyymmdd_integers(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        coros_data = importlib.import_module("coros_data")
+
+        self.assertEqual(coros_data.parse_date_to_yyyymmdd_int("20260510"), 20260510)
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                coros_data.parse_date_to_yyyymmdd_int("2026-05-10")
 
 
 class StaticSafetyTests(unittest.TestCase):
@@ -141,11 +172,16 @@ class StaticSafetyTests(unittest.TestCase):
             (ROOT / path).read_text(encoding="utf-8")
             for path in ("README.md", "SKILL.md", "scripts/coros_data.py", "scripts/coros_web_login.js")
         )
-        self.assertNotIn("teamcnapi", text)
-        self.assertNotIn("apicn", text)
         self.assertNotIn("trainingcn", text)
         self.assertNotIn("Asia/Shanghai|CN", text)
         self.assertNotIn("Europe/Berlin|DE", text)
+
+    def test_cli_text_is_not_chinese_localized(self):
+        text = "\n".join(
+            (ROOT / path).read_text(encoding="utf-8")
+            for path in ("README.md", "SKILL.md", "scripts/coros_data.py")
+        )
+        self.assertIsNone(__import__("re").search(r"[\u4e00-\u9fff]", text))
 
 
 if __name__ == "__main__":

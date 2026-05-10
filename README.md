@@ -11,10 +11,10 @@ This repository is designed for personal analysis workflows and OpenClaw skill u
 
 The bundled script `scripts/coros_data.py` talks to two different COROS API surfaces:
 
-- **Web API** (`teameuapi.coros.com` by default; `teamapi.coros.com` is also allowed)
+- **Web API** (`teameuapi.coros.com` for EU accounts; `teamapi.coros.com` for US/global accounts)
   - Best for training-oriented data
   - Commands: `activities`, `activity-detail`, `schedule`, `hrv`, `daily-metrics`
-- **Mobile API** (`api.coros.com`)
+- **Mobile API** (`apieu.coros.com` for EU accounts; `api.coros.com` for US/global accounts)
   - Best for sleep / daily health data
   - Commands: `sleep`, `auth-mobile`
 
@@ -52,13 +52,13 @@ The script supports one combined setup command plus two lower-level auth channel
 
 ### Recommended setup
 
-Run the combined auth command to obtain and store both tokens:
+Run the combined auth command to obtain and store the Training Hub/web token:
 
 ```bash
 python3 scripts/coros_data.py auth --email you@example.com --write-env
 ```
 
-The command prompts for the password, obtains `COROS_WEB_TOKEN` through the Playwright helper, then attempts to mint `COROS_MOBILE_TOKEN`. If mobile auth is not accepted for the account locale, the web token is still written and the command prints a warning.
+The command prompts for the password, obtains `COROS_WEB_TOKEN` through the Playwright helper, detects the account region when possible, and writes `COROS_REGION` plus the web token. Mobile auth is opt-in because logging in to the mobile API can disrupt the COROS phone app session.
 
 ### 1) Web API auth
 
@@ -95,6 +95,7 @@ Create a local `.coros.env` file:
 ```bash
 export COROS_WEB_TOKEN='your_web_token_here'
 export COROS_MOBILE_TOKEN='your_mobile_token_here'
+export COROS_REGION='eu'
 # or
 # export COROS_MOBILE_EMAIL='you@example.com'
 # export COROS_MOBILE_PASSWORD='your_password_here'
@@ -104,7 +105,7 @@ Optional overrides:
 
 ```bash
 export COROS_WEB_BASE='https://teameuapi.coros.com'
-export COROS_MOBILE_BASE='https://api.coros.com'
+export COROS_MOBILE_BASE='https://apieu.coros.com'
 # Set only if you have confirmed the mobile app payload for your account.
 export COROS_MOBILE_REGION='<captured-mobile-region-tuple>'
 export COROS_MOBILE_LANGUAGE='en-US'
@@ -112,7 +113,7 @@ export COROS_MOBILE_LANGUAGE='en-US'
 
 Use `https://teamapi.coros.com` instead of `https://teameuapi.coros.com` only when the non-EU Training Hub API is the right host for the account.
 
-Only `teameuapi.coros.com`, `teamapi.coros.com`, and `api.coros.com` are accepted by default. Set `COROS_ALLOW_CUSTOM_BASE_URL=1` only when you intentionally want to send credentials to another host.
+Only known COROS web/mobile hosts are accepted by default. Set `COROS_ALLOW_CUSTOM_BASE_URL=1` only when you intentionally want to send credentials to another host.
 
 `COROS_MOBILE_REGION` is optional mobile-login client metadata, not the Training Hub API host. Do not set it unless you have captured or confirmed the tuple used by the COROS mobile app for your account.
 
@@ -130,6 +131,12 @@ Use the combined auth command for normal setup:
 
 ```bash
 python3 scripts/coros_data.py auth --email you@example.com --write-env
+```
+
+Add `--with-mobile` only when you explicitly want to attempt mobile API login at the same time:
+
+```bash
+python3 scripts/coros_data.py auth --email you@example.com --region eu --with-mobile --write-env
 ```
 
 For web-only refreshes, use the Playwright login helper. It stores the token in `.coros.env` without printing it by default:
@@ -153,13 +160,19 @@ You can either:
 Mobile-only refresh command:
 
 ```bash
-python3 scripts/coros_data.py auth-mobile --email you@example.com --write-env
+python3 scripts/coros_data.py auth-mobile --email you@example.com --region eu --write-env
 ```
 
 If the mobile endpoint rejects the account locale, retry only with a region tuple you have captured or confirmed from the mobile app:
 
 ```bash
 python3 scripts/coros_data.py auth-mobile --email you@example.com --mobile-region '<captured-mobile-region-tuple>' --write-env
+```
+
+For endpoint diagnostics without writing tokens or printing secrets:
+
+```bash
+python3 scripts/coros_data.py mobile-diagnose
 ```
 
 Avoid passing passwords as command-line arguments; they can leak through shell history and process listings.
@@ -219,26 +232,26 @@ python3 scripts/coros_data.py sleep --start 20260324 --end 20260330
 ### Sleep
 
 ```text
---- 睡眠 1 ---
-日期: 2026-03-30
-总睡眠: 5h52m
-深睡: 38m
-浅睡: 3h14m
+--- Sleep 1 ---
+Date: 2026-03-30
+Total sleep: 5h52m
+Deep sleep: 38m
+Light sleep: 3h14m
 REM: 2h00m
-清醒: 13m
-小睡: 0m
-平均心率: 54
-最低心率: 49
-最高心率: 70
-睡眠评分: -1
+Awake: 13m
+Nap: 0m
+Average HR: 54
+Min HR: 49
+Max HR: 70
+Sleep score: -1
 ```
 
 ### HRV
 
 ```text
-最近 HRV: 38
-HRV 基线: 33
-HRV 波动: 3.33
+Recent HRV: 38
+HRV baseline: 33
+HRV variation: 3.33
 2026-03-24: avg=36 base=33
 2026-03-25: avg=32 base=33
 ```
@@ -253,7 +266,8 @@ python3 scripts/coros_data.py hrv
 python3 scripts/coros_data.py daily-metrics --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py sleep --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py auth --email <email> --write-env
-python3 scripts/coros_data.py auth-mobile --email <email> --write-env
+python3 scripts/coros_data.py auth-mobile --email <email> --region eu --write-env
+python3 scripts/coros_data.py mobile-diagnose
 ```
 
 ## Data notes
@@ -278,7 +292,7 @@ For structured workout/schedule field notes, see:
 
 ## Known limitations
 
-- **Mobile API is incomplete.** Several COROS mobile endpoints (particularly sleep/day and sleep/dayDetail) are mapped but return server errors or unknown parameter errors. Packet capture of the COROS mobile app (iOS/Android) would help identify the correct endpoints and parameters. PRs welcome.
+- **Mobile API is unofficial.** EU mobile auth uses `apieu.coros.com`; US/global mobile auth uses `api.coros.com`. Mobile login can log out the COROS phone app and may still require captured app metadata if COROS changes the private API.
 - COROS web and mobile APIs expose different slices of data.
 - Some field meanings are still empirical and documented in `references/coros-workout-field-notes.md`.
 - Output is optimized for CLI inspection, not yet for stable JSON schemas across all commands.
