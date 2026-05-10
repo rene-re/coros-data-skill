@@ -28,6 +28,21 @@ def run_help(extra_env):
     )
 
 
+def run_command(args, extra_env=None):
+    env = os.environ.copy()
+    for key in ("COROS_WEB_BASE", "COROS_MOBILE_BASE", "COROS_ALLOW_CUSTOM_BASE_URL"):
+        env.pop(key, None)
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), *args],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 class SecurityConfigTests(unittest.TestCase):
     def test_default_endpoints_are_global_coros_hosts(self):
         result = run_help({})
@@ -82,6 +97,37 @@ class SecurityConfigTests(unittest.TestCase):
             with redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     coros_data.write_env_value("COROS_MOBILE_TOKEN", "token", env_file=env_file)
+
+    def test_write_env_values_replaces_both_tokens_privately(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        coros_data = importlib.import_module("coros_data")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".coros.env"
+            env_file.write_text("export COROS_WEB_TOKEN='old'\nexport OTHER='keep'\nCOROS_MOBILE_TOKEN=old\n", encoding="utf-8")
+            env_file.chmod(0o600)
+
+            coros_data.write_env_values(
+                {"COROS_WEB_TOKEN": "web-token", "COROS_MOBILE_TOKEN": "mobile-token"},
+                env_file=env_file,
+            )
+
+            mode = stat.S_IMODE(env_file.stat().st_mode)
+            self.assertEqual(mode, 0o600)
+            self.assertEqual(
+                env_file.read_text(encoding="utf-8"),
+                "export COROS_WEB_TOKEN='web-token'\nexport OTHER='keep'\nexport COROS_MOBILE_TOKEN='mobile-token'\n",
+            )
+
+    def test_combined_auth_command_is_registered(self):
+        result = run_command(["auth", "--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--write-env", result.stdout)
+
+    def test_combined_auth_rejects_missing_email(self):
+        result = run_command(["auth", "--password", "fake"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Missing COROS email", result.stderr)
 
 
 class StaticSafetyTests(unittest.TestCase):

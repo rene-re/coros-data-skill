@@ -20,28 +20,43 @@ Use the bundled script at `{baseDir}/scripts/coros_data.py`.
 - Mobile API defaults to `https://api.coros.com`.
 - Custom API bases require `COROS_ALLOW_CUSTOM_BASE_URL=1`.
 - Web API uses `COROS_WEB_TOKEN`.
-- Mobile API can use either `COROS_MOBILE_TOKEN` or `COROS_MOBILE_EMAIL` + `COROS_MOBILE_PASSWORD`.
-- Prefer env-based mobile login for this skill.
-- Use `auth-mobile` to mint a mobile token manually when needed.
-- **Web token** — `COROS_WEB_TOKEN` is obtained via Playwright browser login (see below).
+- Mobile API uses `COROS_MOBILE_TOKEN`.
+- Use `python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env` for normal setup.
+- Use `auth-mobile` only for mobile-token refreshes.
+- **Web token** — `COROS_WEB_TOKEN` is obtained through Playwright browser login inside the combined auth command.
 - If neither token nor credentials are present, mobile commands cannot run.
 
-### Getting Web Token via Playwright
+### Getting Tokens
 
-The web API (`COROS_WEB_TOKEN`) cannot be obtained via mobile API login. Use the Playwright script:
+COROS requires two tokens internally. Use the combined setup command to obtain both:
+
+```bash
+python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env
+```
+
+This prompts for the password, obtains `COROS_MOBILE_TOKEN` and `COROS_WEB_TOKEN`, and writes both to `{baseDir}/.coros.env` with restrictive file permissions. To display tokens for manual handling, add `--print-token`.
+
+Do not pass passwords as positional command-line arguments.
+
+Chromium sandboxing is disabled by default for constrained VM compatibility. Set `COROS_PLAYWRIGHT_SANDBOX=1` only on hosts that support Chromium sandboxing.
+
+The combined command:
+1. Mints a mobile token through the mobile API
+2. Launches a headless Chromium browser
+3. Navigates to the COROS Training Hub login page
+4. Fills credentials and **checks the hidden privacy policy checkbox** (which blocks naive automation)
+5. Submits the form and waits for navigation
+6. Extracts the `CPL-coros-token` cookie (the web API access token)
+7. Saves session cookies to `../.coros_web_session` with `0600` permissions for potential reuse
+
+For web-only refreshes, use the Playwright script:
 
 ```bash
 cd {baseDir}/scripts
 COROS_EMAIL=<email> node coros_web_login.js --write-env
 ```
 
-This writes the token to `{baseDir}/.coros.env` with restrictive file permissions. To display the token for manual handling, add `--print-token`.
-
-Do not pass passwords as positional command-line arguments.
-
-Chromium sandboxing is disabled by default for constrained VM compatibility. Set `COROS_PLAYWRIGHT_SANDBOX=1` only on hosts that support Chromium sandboxing.
-
-The script:
+The Playwright script:
 1. Launches a headless Chromium browser
 2. Navigates to the COROS Training Hub login page
 3. Fills credentials and **checks the hidden privacy policy checkbox** (which blocks naive automation)
@@ -56,11 +71,8 @@ The script:
 ```bash
 set -a && . {baseDir}/.coros.env && set +a
 
-# Get web token (Playwright - needed for activity/schedule/HRV data)
-COROS_EMAIL=<email> node {baseDir}/scripts/coros_web_login.js --write-env
-
-# Mint and store mobile token (for sleep / daily health)
-python3 {baseDir}/scripts/coros_data.py auth-mobile --email <email> --write-env
+# Setup auth tokens
+python3 {baseDir}/scripts/coros_data.py auth --email <email> --write-env
 
 # Activities (uses COROS_WEB_TOKEN)
 python3 {baseDir}/scripts/coros_data.py activities --size 10

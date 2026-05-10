@@ -48,7 +48,17 @@ pip install requests pycryptodomex
 
 ## Authentication
 
-The script supports two auth channels.
+The script supports one combined setup command plus two lower-level auth channels.
+
+### Recommended setup
+
+Run the combined auth command to obtain and store both tokens:
+
+```bash
+python3 scripts/coros_data.py auth --email you@example.com --write-env
+```
+
+The command prompts for the password, mints `COROS_MOBILE_TOKEN`, obtains `COROS_WEB_TOKEN` through the Playwright helper, and writes both tokens to `.coros.env` only after both steps succeed.
 
 ### 1) Web API auth
 
@@ -109,7 +119,13 @@ set -a && . ./.coros.env && set +a
 
 ### Web token
 
-Use the Playwright login helper. It stores the token in `.coros.env` without printing it by default:
+Use the combined auth command for normal setup:
+
+```bash
+python3 scripts/coros_data.py auth --email you@example.com --write-env
+```
+
+For web-only refreshes, use the Playwright login helper. It stores the token in `.coros.env` without printing it by default:
 
 ```bash
 cd scripts
@@ -125,9 +141,9 @@ Chromium sandboxing is disabled by default for constrained VM compatibility. Set
 You can either:
 
 - capture a token from the mobile app traffic / existing environment
-- or let the script log in with email + password
+- or let the combined auth command log in with email + password
 
-Manual login command:
+Mobile-only refresh command:
 
 ```bash
 python3 scripts/coros_data.py auth-mobile --email you@example.com --write-env
@@ -223,6 +239,7 @@ python3 scripts/coros_data.py schedule --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py hrv
 python3 scripts/coros_data.py daily-metrics --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py sleep --start YYYYMMDD --end YYYYMMDD
+python3 scripts/coros_data.py auth --email <email> --write-env
 python3 scripts/coros_data.py auth-mobile --email <email> --write-env
 ```
 

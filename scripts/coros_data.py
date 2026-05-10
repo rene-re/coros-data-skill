@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -19,6 +20,7 @@ DEFAULT_MOBILE_BASE = "https://api.coros.com"
 ALLOWED_WEB_HOSTS = {"teamapi.coros.com"}
 ALLOWED_MOBILE_HOSTS = {"api.coros.com"}
 ENV_FILE = Path(__file__).resolve().parents[1] / ".coros.env"
+WEB_LOGIN_SCRIPT = Path(__file__).resolve().parent / "coros_web_login.js"
 
 
 def fail(message):
@@ -97,6 +99,63 @@ def write_env_value(key, value, env_file=ENV_FILE):
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write("\n".join(next_lines).rstrip() + "\n")
     os.chmod(env_file, 0o600)
+
+
+def write_env_values(values, env_file=ENV_FILE):
+    ensure_secret_file_permissions(env_file)
+    lines = []
+    if env_file.exists():
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+
+    pending = dict(values)
+    next_lines = []
+    for line in lines:
+        stripped = line.strip()
+        replaced = False
+        for key in list(pending):
+            if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+                next_lines.append(f"export {key}={shell_quote(pending.pop(key))}")
+                replaced = True
+                break
+        if not replaced:
+            next_lines.append(line)
+    for key, value in pending.items():
+        next_lines.append(f"export {key}={shell_quote(value)}")
+
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(next_lines).rstrip() + "\n")
+    os.chmod(env_file, 0o600)
+
+
+def resolve_auth_inputs(args):
+    email = args.email or MOBILE_EMAIL or os.environ.get("COROS_EMAIL")
+    if not email:
+        fail("Missing COROS email; pass --email or set COROS_EMAIL")
+    if getattr(args, "password", None):
+        print("Warning: --password can leak through shell history and process lists; prefer prompt input.", file=sys.stderr)
+    password = getattr(args, "password", None) or MOBILE_PASSWORD or os.environ.get("COROS_PASSWORD")
+    if not password:
+        if sys.stdin.isatty():
+            password = getpass.getpass("COROS password: ")
+        else:
+            fail("Missing COROS password; set COROS_PASSWORD or run interactively")
+    return email, password
+
+
+def web_login(email, password):
+    env = os.environ.copy()
+    env["COROS_EMAIL"] = email
+    env["COROS_PASSWORD"] = password
+    command = ["node", str(WEB_LOGIN_SCRIPT), "--print-token"]
+    result = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "web login failed"
+        fail(message)
+    token = result.stdout.strip()
+    if not token:
+        fail("Web login succeeded but token output missing")
+    return token
 
 
 def require_web_token():
@@ -346,18 +405,7 @@ def cmd_daily_metrics(args):
 
 
 def cmd_auth_mobile(args):
-    email = args.email or MOBILE_EMAIL
-    if not email:
-        fail("Missing COROS mobile email; pass --email or set COROS_MOBILE_EMAIL")
-    if args.password:
-        print("Warning: --password can leak through shell history and process lists; prefer COROS_MOBILE_PASSWORD or prompt input.", file=sys.stderr)
-    password = args.password or MOBILE_PASSWORD
-    if not password:
-        if sys.stdin.isatty():
-            password = getpass.getpass("COROS password: ")
-        else:
-            fail("Missing COROS mobile password; set COROS_MOBILE_PASSWORD or run interactively")
-
+    email, password = resolve_auth_inputs(args)
     token = mobile_login(email, password)
     if args.write_env:
         write_env_value("COROS_MOBILE_TOKEN", token)
@@ -366,6 +414,20 @@ def cmd_auth_mobile(args):
         print(token)
     if not args.write_env and not args.print_token:
         print("Mobile token obtained. Re-run with --write-env to store it or --print-token to display it.", file=sys.stderr)
+
+
+def cmd_auth(args):
+    email, password = resolve_auth_inputs(args)
+    mobile_token = mobile_login(email, password)
+    web_token = web_login(email, password)
+
+    if args.write_env:
+        write_env_values({"COROS_MOBILE_TOKEN": mobile_token, "COROS_WEB_TOKEN": web_token})
+        print(f"Wrote COROS_MOBILE_TOKEN and COROS_WEB_TOKEN to {ENV_FILE}", file=sys.stderr)
+    if args.print_token:
+        print(json.dumps({"COROS_MOBILE_TOKEN": mobile_token, "COROS_WEB_TOKEN": web_token}, indent=2))
+    if not args.write_env and not args.print_token:
+        print("COROS tokens obtained. Re-run with --write-env to store them or --print-token to display them.", file=sys.stderr)
 
 
 def cmd_sleep(args):
@@ -426,6 +488,13 @@ def build_parser():
     daily.add_argument("--start", required=True)
     daily.add_argument("--end", required=True)
     daily.set_defaults(func=cmd_daily_metrics)
+
+    auth = sub.add_parser("auth")
+    auth.add_argument("--email")
+    auth.add_argument("--password", help="Deprecated: prefer prompt input")
+    auth.add_argument("--print-token", action="store_true")
+    auth.add_argument("--write-env", action="store_true")
+    auth.set_defaults(func=cmd_auth)
 
     auth_mobile = sub.add_parser("auth-mobile")
     auth_mobile.add_argument("--email")
