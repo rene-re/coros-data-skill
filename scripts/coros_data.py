@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import getpass
 import hashlib
 import json
 import os
@@ -8,12 +9,46 @@ import random
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
-from Cryptodome.Cipher import AES
 
-WEB_BASE = os.environ.get("COROS_WEB_BASE", "https://teamcnapi.coros.com")
-MOBILE_BASE = os.environ.get("COROS_MOBILE_BASE", "https://apicn.coros.com")
+DEFAULT_WEB_BASE = "https://teamapi.coros.com"
+DEFAULT_MOBILE_BASE = "https://api.coros.com"
+ALLOWED_WEB_HOSTS = {"teamapi.coros.com"}
+ALLOWED_MOBILE_HOSTS = {"api.coros.com"}
+ENV_FILE = Path(__file__).resolve().parents[1] / ".coros.env"
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(1)
+
+
+def env_truthy(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_base_url(value, var_name, allowed_hosts):
+    parsed = urlparse(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        fail(f"{var_name} must be an https URL")
+    if parsed.username or parsed.password:
+        fail(f"{var_name} must not include credentials")
+    allow_custom = env_truthy("COROS_ALLOW_CUSTOM_BASE_URL")
+    if parsed.hostname not in allowed_hosts and not allow_custom:
+        allowed = ", ".join(sorted(allowed_hosts))
+        fail(f"{var_name} host must be {allowed}; set COROS_ALLOW_CUSTOM_BASE_URL=1 to override")
+    return value.rstrip("/")
+
+
+WEB_BASE = normalize_base_url(os.environ.get("COROS_WEB_BASE", DEFAULT_WEB_BASE), "COROS_WEB_BASE", ALLOWED_WEB_HOSTS)
+MOBILE_BASE = normalize_base_url(
+    os.environ.get("COROS_MOBILE_BASE", DEFAULT_MOBILE_BASE),
+    "COROS_MOBILE_BASE",
+    ALLOWED_MOBILE_HOSTS,
+)
 WEB_TOKEN = os.environ.get("COROS_WEB_TOKEN") or os.environ.get("COROS_ACCESS_TOKEN")
 MOBILE_TOKEN = os.environ.get("COROS_MOBILE_TOKEN")
 MOBILE_EMAIL = os.environ.get("COROS_MOBILE_EMAIL")
@@ -24,14 +59,44 @@ WEB_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
-    "Origin": "https://trainingcn.coros.com",
-    "Referer": "https://trainingcn.coros.com/",
+    "Origin": "https://training.coros.com",
+    "Referer": "https://training.coros.com/",
 }
 
 
-def fail(message):
-    print(message, file=sys.stderr)
-    sys.exit(1)
+def shell_quote(value):
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def ensure_secret_file_permissions(path):
+    if path.exists() and path.stat().st_mode & 0o077:
+        fail(f"{path} is readable by group/others; run: chmod 600 {path}")
+
+
+def write_env_value(key, value, env_file=ENV_FILE):
+    ensure_secret_file_permissions(env_file)
+    lines = []
+    if env_file.exists():
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+
+    replacement = f"export {key}={shell_quote(value)}"
+    replaced = False
+    next_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"export {key}="):
+            if not replaced:
+                next_lines.append(replacement)
+                replaced = True
+            continue
+        next_lines.append(line)
+    if not replaced:
+        next_lines.append(replacement)
+
+    fd = os.open(env_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(next_lines).rstrip() + "\n")
+    os.chmod(env_file, 0o600)
 
 
 def require_web_token():
@@ -92,6 +157,8 @@ def md5_hex(value):
 
 
 def mobile_encrypt(plaintext, app_key):
+    from Cryptodome.Cipher import AES
+
     key = app_key.encode("ascii")
     data = plaintext.encode("utf-8")
     xored = bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
@@ -273,8 +340,26 @@ def cmd_daily_metrics(args):
 
 
 def cmd_auth_mobile(args):
-    token = mobile_login(args.email, args.password)
-    print(token)
+    email = args.email or MOBILE_EMAIL
+    if not email:
+        fail("Missing COROS mobile email; pass --email or set COROS_MOBILE_EMAIL")
+    if args.password:
+        print("Warning: --password can leak through shell history and process lists; prefer COROS_MOBILE_PASSWORD or prompt input.", file=sys.stderr)
+    password = args.password or MOBILE_PASSWORD
+    if not password:
+        if sys.stdin.isatty():
+            password = getpass.getpass("COROS password: ")
+        else:
+            fail("Missing COROS mobile password; set COROS_MOBILE_PASSWORD or run interactively")
+
+    token = mobile_login(email, password)
+    if args.write_env:
+        write_env_value("COROS_MOBILE_TOKEN", token)
+        print(f"Wrote COROS_MOBILE_TOKEN to {ENV_FILE}", file=sys.stderr)
+    if args.print_token:
+        print(token)
+    if not args.write_env and not args.print_token:
+        print("Mobile token obtained. Re-run with --write-env to store it or --print-token to display it.", file=sys.stderr)
 
 
 def cmd_sleep(args):
@@ -337,8 +422,10 @@ def build_parser():
     daily.set_defaults(func=cmd_daily_metrics)
 
     auth_mobile = sub.add_parser("auth-mobile")
-    auth_mobile.add_argument("--email", required=True)
-    auth_mobile.add_argument("--password", required=True)
+    auth_mobile.add_argument("--email")
+    auth_mobile.add_argument("--password", help="Deprecated: prefer COROS_MOBILE_PASSWORD or interactive prompt")
+    auth_mobile.add_argument("--print-token", action="store_true")
+    auth_mobile.add_argument("--write-env", action="store_true")
     auth_mobile.set_defaults(func=cmd_auth_mobile)
 
     sleep = sub.add_parser("sleep")

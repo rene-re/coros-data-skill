@@ -1,6 +1,6 @@
 ---
 name: coros-data-skill
-description: Access COROS data through a dual-channel integration: use mobile API for daily health metrics like sleep stages, sleep heart rate, and wellness-style daily stats; use COROS Training Hub web API for activities, activity details, training plans, workout programs, training schedule, HRV, recovery, threshold metrics, and training analysis. Use when the user asks about COROS, sleep, REM, deep sleep, resting heart rate, HRV, training load, activities, runs, rides, workouts, training plans, or schedule data.
+description: Access a user's authenticated COROS account data through a dual-channel integration. Use only when the user explicitly asks to fetch or analyze COROS account data such as COROS activities, COROS sleep, COROS HRV, COROS training plans, COROS workout programs, or COROS training schedule.
 ---
 
 # COROS Data Skill
@@ -16,6 +16,9 @@ Use the bundled script at `{baseDir}/scripts/coros_data.py`.
 ## Auth model
 
 - Load environment from `{baseDir}/.coros.env` when present.
+- Web API defaults to `https://teamapi.coros.com`.
+- Mobile API defaults to `https://api.coros.com`.
+- Custom API bases require `COROS_ALLOW_CUSTOM_BASE_URL=1`.
 - Web API uses `COROS_WEB_TOKEN`.
 - Mobile API can use either `COROS_MOBILE_TOKEN` or `COROS_MOBILE_EMAIL` + `COROS_MOBILE_PASSWORD`.
 - Prefer env-based mobile login for this skill.
@@ -29,16 +32,12 @@ The web API (`COROS_WEB_TOKEN`) cannot be obtained via mobile API login. Use the
 
 ```bash
 cd {baseDir}/scripts
-node coros_web_login.js [email] [password]
+COROS_EMAIL=<email> node coros_web_login.js --write-env
 ```
 
-This prints the token to stdout. To save it:
+This writes the token to `{baseDir}/.coros.env` with restrictive file permissions. To display the token for manual handling, add `--print-token`.
 
-```bash
-cd {baseDir}/scripts
-TOKEN=$(node coros_web_login.js)
-sed -i "s/export COROS_WEB_TOKEN='.*'/export COROS_WEB_TOKEN='$TOKEN'/" ../.coros.env
-```
+Do not pass passwords as positional command-line arguments.
 
 The script:
 1. Launches a headless Chromium browser
@@ -46,7 +45,7 @@ The script:
 3. Fills credentials and **checks the hidden privacy policy checkbox** (which blocks naive automation)
 4. Submits the form and waits for navigation
 5. Extracts the `CPL-coros-token` cookie (the web API access token)
-6. Saves session cookies to `../.coros_web_session` for potential reuse
+6. Saves session cookies to `../.coros_web_session` with `0600` permissions for potential reuse
 
 **Note:** The privacy policy checkbox must be checked — it is visually hidden and rejects programmatic clicks. The script uses `evaluate()` to check it directly via JavaScript.
 
@@ -55,11 +54,11 @@ The script:
 ```bash
 set -a && . {baseDir}/.coros.env && set +a
 
-# Get web token (Playwright — needed for activity/schedule/HRV data)
-node {baseDir}/scripts/coros_web_login.js
+# Get web token (Playwright - needed for activity/schedule/HRV data)
+COROS_EMAIL=<email> node {baseDir}/scripts/coros_web_login.js --write-env
 
-# Mint mobile token (for sleep / daily health)
-python3 {baseDir}/scripts/coros_data.py auth-mobile --email <email> --password <password>
+# Mint and store mobile token (for sleep / daily health)
+python3 {baseDir}/scripts/coros_data.py auth-mobile --email <email> --write-env
 
 # Activities (uses COROS_WEB_TOKEN)
 python3 {baseDir}/scripts/coros_data.py activities --size 10

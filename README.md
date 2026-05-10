@@ -11,10 +11,10 @@ This repository is designed for personal analysis workflows and OpenClaw skill u
 
 The bundled script `scripts/coros_data.py` talks to two different COROS API surfaces:
 
-- **Web API** (`teamcnapi.coros.com`)
+- **Web API** (`teamapi.coros.com`)
   - Best for training-oriented data
   - Commands: `activities`, `activity-detail`, `schedule`, `hrv`, `daily-metrics`
-- **Mobile API** (`apicn.coros.com`)
+- **Mobile API** (`api.coros.com`)
   - Best for sleep / daily health data
   - Commands: `sleep`, `auth-mobile`
 
@@ -83,19 +83,21 @@ If email/password are provided, the script can log in and mint a mobile token au
 Create a local `.coros.env` file:
 
 ```bash
-COROS_WEB_TOKEN=your_web_token_here
-COROS_MOBILE_TOKEN=your_mobile_token_here
+export COROS_WEB_TOKEN='your_web_token_here'
+export COROS_MOBILE_TOKEN='your_mobile_token_here'
 # or
-# COROS_MOBILE_EMAIL=you@example.com
-# COROS_MOBILE_PASSWORD=your_password_here
+# export COROS_MOBILE_EMAIL='you@example.com'
+# export COROS_MOBILE_PASSWORD='your_password_here'
 ```
 
 Optional overrides:
 
 ```bash
-COROS_WEB_BASE=https://teamcnapi.coros.com
-COROS_MOBILE_BASE=https://apicn.coros.com
+export COROS_WEB_BASE='https://teamapi.coros.com'
+export COROS_MOBILE_BASE='https://api.coros.com'
 ```
+
+Only `teamapi.coros.com` and `api.coros.com` are accepted by default. Set `COROS_ALLOW_CUSTOM_BASE_URL=1` only when you intentionally want to send credentials to another host.
 
 Load env before running:
 
@@ -107,15 +109,14 @@ set -a && . ./.coros.env && set +a
 
 ### Web token
 
-A practical way is to log in to COROS Training Hub in the browser and capture the token from cookies or requests.
+Use the Playwright login helper. It stores the token in `.coros.env` without printing it by default:
 
-Typical workflow:
+```bash
+cd scripts
+COROS_EMAIL='you@example.com' node coros_web_login.js --write-env
+```
 
-1. Open `https://trainingcn.coros.com/`
-2. Log in
-3. Open browser DevTools
-4. Find the token used for requests to `teamcnapi.coros.com`
-5. Save it as `COROS_WEB_TOKEN`
+Add `--print-token` only when you intentionally need to display the token.
 
 ### Mobile token
 
@@ -127,8 +128,10 @@ You can either:
 Manual login command:
 
 ```bash
-python3 scripts/coros_data.py auth-mobile --email you@example.com --password 'your-password'
+python3 scripts/coros_data.py auth-mobile --email you@example.com --write-env
 ```
+
+Avoid passing passwords as command-line arguments; they can leak through shell history and process listings.
 
 ## Usage
 
@@ -218,7 +221,7 @@ python3 scripts/coros_data.py schedule --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py hrv
 python3 scripts/coros_data.py daily-metrics --start YYYYMMDD --end YYYYMMDD
 python3 scripts/coros_data.py sleep --start YYYYMMDD --end YYYYMMDD
-python3 scripts/coros_data.py auth-mobile --email <email> --password <password>
+python3 scripts/coros_data.py auth-mobile --email <email> --write-env
 ```
 
 ## Data notes
@@ -236,6 +239,8 @@ For structured workout/schedule field notes, see:
 
 - Do **not** commit real tokens or passwords.
 - Keep `.coros.env` local only.
+- Keep `.coros.env` and `.coros_web_session` mode `0600`.
+- Avoid positional password arguments and default token printing.
 - Rotate tokens if they leak.
 - Treat captured auth material as sensitive account credentials.
 
